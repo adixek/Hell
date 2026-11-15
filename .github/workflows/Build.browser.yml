@@ -25,10 +25,12 @@ permissions:
 
 env:
   MESA_VERSION: "26.2.2"
-  # Redmi "sky" (ravelin) reports KGSL firmware gen6_3_26_0 => chip_id 0x06032600.
-  # Turnip's KGSL backend derives gpu_id = core*100 + major*10 + minor = 656 from it,
-  # so a bare GPUId(613) never matches. Match on the real chip_id instead.
-  A613_CHIP_ID: "0x06032600"
+  # Redmi "sky" (ravelin): device tree says qcom,chipid = <0x06010300>,
+  # qcom,gpu-model = "Adreno613v1" (compatible qcom,adreno-gpu-gen6-3-26-0).
+  # Turnip's KGSL backend derives gpu_id = core*100 + major*10 + minor = 613
+  # from it. GPUId(613) matches on gpu_id (any patch byte); the chip_id entries
+  # match on the exact id and its fuse-wildcard form.
+  A613_CHIP_ID: "0x06010300"
 
 jobs:
   # ---------------------------------------------------------------------------
@@ -68,16 +70,33 @@ jobs:
           curl -fsSL "https://archive.mesa3d.org/mesa-${MESA_VERSION}.tar.xz" | tar -xJ
           cd "mesa-${MESA_VERSION}"
           dev=src/freedreno/common/freedreno_devices.py
-          if ! grep -q "chip_id=${A613_CHIP_ID}" "$dev"; then
-            if ! grep -q 'GPUId(612)' "$dev"; then
-              echo "::error::GPUId(612) anchor not found; printing nearby context"
-              grep -n -B3 -A6 'a6xx_gen1_low' "$dev" || true
-              grep -n '612' "$dev" || true
-              exit 1
-            fi
-            sed -i "/^[[:space:]]*GPUId(612),/a\\        GPUId(chip_id=${A613_CHIP_ID}, name=\"Adreno (TM) 613\"),\\n        GPUId(chip_id=0xffff${A613_CHIP_ID#0x}, name=\"Adreno (TM) 613\")," "$dev"
-          fi
-          grep -n -B3 -A3 "chip_id=${A613_CHIP_ID}" "$dev"
+          echo "--- existing 613 / 0x0601 entries in upstream table (informational) ---"
+          grep -n -E '613|0x0601[0-9a-f]{4}' "$dev" || true
+          python3 - "$dev" <<'PY'
+          import os, re, sys
+          p = sys.argv[1]
+          s = open(p).read()
+          if "Adreno (TM) 613" in s:
+              print("Adreno (TM) 613 already present; not inserting")
+              sys.exit(0)
+          m = re.search(r'^([ \t]*)GPUId\(612\),\n', s, re.M)
+          if not m:
+              print("::error::GPUId(612) anchor not found")
+              sys.exit(1)
+          ind = m.group(1)
+          cid = os.environ["A613_CHIP_ID"]
+          name = '"Adreno (TM) 613"'
+          ids = [
+              f'GPUId(613, name={name})',
+              f'GPUId(chip_id={cid}, name={name})',
+              f'GPUId(chip_id=0xffff{cid[2:]}, name={name})',
+          ]
+          add = "".join(f"{ind}{i},\n" for i in ids)
+          s = s[:m.end()] + add + s[m.end():]
+          open(p, "w").write(s)
+          print("inserted Adreno 613 entries")
+          PY
+          grep -n -B3 -A6 'Adreno (TM) 613' "$dev"
           # Same order build-turnip-a825.sh uses: a825 -> a722
           for p in a825 a722 zink-kgsl-surfaceless; do
             patch --dry-run -p1 -i "../source/patches/mesa-${MESA_VERSION}-$p"*.patch
@@ -116,16 +135,31 @@ jobs:
           mv "mesa-${MESA_VERSION}" mesa-src
           cd mesa-src
           dev=src/freedreno/common/freedreno_devices.py
-          if ! grep -q "chip_id=${A613_CHIP_ID}" "$dev"; then
-            if ! grep -q 'GPUId(612)' "$dev"; then
-              echo "::error::GPUId(612) anchor not found; printing nearby context"
-              grep -n -B3 -A6 'a6xx_gen1_low' "$dev" || true
-              grep -n '612' "$dev" || true
-              exit 1
-            fi
-            sed -i "/^[[:space:]]*GPUId(612),/a\\        GPUId(chip_id=${A613_CHIP_ID}, name=\"Adreno (TM) 613\"),\\n        GPUId(chip_id=0xffff${A613_CHIP_ID#0x}, name=\"Adreno (TM) 613\")," "$dev"
-          fi
-          grep -n -B3 -A3 "chip_id=${A613_CHIP_ID}" "$dev"
+          python3 - "$dev" <<'PY'
+          import os, re, sys
+          p = sys.argv[1]
+          s = open(p).read()
+          if "Adreno (TM) 613" in s:
+              print("Adreno (TM) 613 already present; not inserting")
+              sys.exit(0)
+          m = re.search(r'^([ \t]*)GPUId\(612\),\n', s, re.M)
+          if not m:
+              print("::error::GPUId(612) anchor not found")
+              sys.exit(1)
+          ind = m.group(1)
+          cid = os.environ["A613_CHIP_ID"]
+          name = '"Adreno (TM) 613"'
+          ids = [
+              f'GPUId(613, name={name})',
+              f'GPUId(chip_id={cid}, name={name})',
+              f'GPUId(chip_id=0xffff{cid[2:]}, name={name})',
+          ]
+          add = "".join(f"{ind}{i},\n" for i in ids)
+          s = s[:m.end()] + add + s[m.end():]
+          open(p, "w").write(s)
+          print("inserted Adreno 613 entries")
+          PY
+          grep -n -B3 -A6 'Adreno (TM) 613' "$dev"
 
       - name: Build libvulkan_freedreno.so (Alpine / musl)
         run: |
