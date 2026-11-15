@@ -231,8 +231,8 @@ jobs:
           fi
           cur=$(python3 -c "import json;print(json.load(open('plugin.json'))['version'])")
           if [ -z "$ver" ]; then
-            echo "::error::No version. Push a tag like v1.5.7 or pass the 'version' input (repo plugin.json is $cur)."
-            exit 1
+            ver=$(python3 -c "import sys;a=sys.argv[1].split('.');a[-1]=str(int(a[-1])+1);print('.'.join(a))" "$cur")
+            echo "::warning::No tag or version input; auto-bumping $cur -> $ver"
           fi
           if [ "$ver" = "$cur" ]; then
             echo "::error::Version $ver equals plugin.json ($cur). The manifest would point at the OLD release's runtime.xz. Bump it."
