@@ -14,11 +14,6 @@ on:
         description: "Plugin version, e.g. 1.5.7 (defaults to tag name). Must differ from plugin.json in the repo."
         required: false
         type: string
-      test_sign:
-        description: "Test build: sign plugin.json with a throwaway key (public key is uploaded)"
-        required: false
-        type: boolean
-        default: false
 
 permissions:
   contents: read
@@ -222,7 +217,8 @@ jobs:
 
   # ---------------------------------------------------------------------------
   # Overlay the fresh Turnip build onto the staged runtime, pack it into
-  # runtime.xz, refresh plugin.json, optionally sign it.
+  # runtime.xz, refresh plugin.json, and bundle everything into an unsigned,
+  # installable .aerap package.
   #
   # The WPE WebKit / Mesa-EGL / worker runtime is NOT built here (see
   # source/BUILD-NOTES.md). Provide it as a tarball, or leave unset to start
@@ -237,7 +233,6 @@ jobs:
     env:
       STAGED_RUNTIME_URL: ${{ inputs.staged_runtime_url || vars.STAGED_RUNTIME_URL }}
       STAGED_RUNTIME_TOKEN: ${{ secrets.STAGED_RUNTIME_TOKEN }}
-      SIGNING_KEY: ${{ secrets.AERA_PLUGIN_PRIVATE_KEY }}
     steps:
       - uses: actions/checkout@v4
 
@@ -379,61 +374,34 @@ jobs:
           PY
           head -20 build/plugin.json
 
-      - name: Sign plugin.json (test key, throwaway)
-        if: ${{ inputs.test_sign }}
+      # Unsigned build: bundle plugin.json + runtime.xz into an unofficial
+      # .aerap using the registry's packager. Installable from the recovery
+      # Files app after a security warning.
+      - name: Build unofficial .aerap package
         run: |
-          umask 077
-          openssl genpkey -algorithm ED25519 -out "$RUNNER_TEMP/test-key.pem"
-          openssl pkey -in "$RUNNER_TEMP/test-key.pem" -pubout -out build/test-signing-public.pem
-          openssl pkeyutl -sign -rawin -inkey "$RUNNER_TEMP/test-key.pem" \
-            -in build/plugin.json -out build/plugin.json.sig.bin
-          xxd -p -c 256 build/plugin.json.sig.bin > build/plugin.json.sig
-          # Prove the signature verifies with the public key we publish.
-          xxd -r -p build/plugin.json.sig > "$RUNNER_TEMP/verify.bin"
-          openssl pkeyutl -verify -rawin -pubin -inkey build/test-signing-public.pem \
-            -in build/plugin.json -sigfile "$RUNNER_TEMP/verify.bin"
-          rm -f "$RUNNER_TEMP/test-key.pem" "$RUNNER_TEMP/verify.bin" build/plugin.json.sig.bin
-          {
-            echo "### Test-signed build"
-            echo "plugin.json was signed with a throwaway Ed25519 key. Only a recovery that trusts this public key will accept it:"
-            echo '```'
-            cat build/test-signing-public.pem
-            echo '```'
-          } >> "$GITHUB_STEP_SUMMARY"
-
-      - name: Sign plugin.json (Ed25519)
-        if: ${{ env.SIGNING_KEY != '' && !inputs.test_sign }}
-        run: |
-          umask 077
-          printf '%s\n' "$SIGNING_KEY" > key.pem
-          openssl pkeyutl -sign -rawin -inkey key.pem \
-            -in build/plugin.json -out build/plugin.json.sig.bin
-          xxd -p -c 256 build/plugin.json.sig.bin > build/plugin.json.sig
-          rm -f key.pem build/plugin.json.sig.bin
-
-      - name: Warn if unsigned
-        if: ${{ env.SIGNING_KEY == '' && !inputs.test_sign }}
-        run: |
-          echo "::warning::No AERA_PLUGIN_PRIVATE_KEY secret, so plugin.json is UNSIGNED. A recovery that verifies signatures will reject it."
+          git clone --depth 1 https://github.com/AERA-Plugins/registry.git /tmp/registry
+          python3 /tmp/registry/scripts/package_aerap.py \
+            --manifest build/plugin.json \
+            --payload build/runtime.xz \
+            --output "build/AERA-Browser-${PLUGIN_VERSION}.aerap"
+          ls -l build/*.aerap
 
       - uses: actions/upload-artifact@v4
         with:
           name: aera-browser-plugin
           path: |
+            build/AERA-Browser-*.aerap
             build/runtime.xz
             build/plugin.json
-            build/plugin.json.sig
-            build/test-signing-public.pem
             build/manifest.json
             build/aera_browser_payload.hpp
           if-no-files-found: error
 
       - name: Publish GitHub release
-        if: ${{ github.ref_type == 'tag' && !inputs.test_sign }}
+        if: ${{ github.ref_type == 'tag' }}
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          files=(build/runtime.xz build/plugin.json)
-          [ -f build/plugin.json.sig ] && files+=(build/plugin.json.sig)
+          files=(build/runtime.xz build/plugin.json "build/AERA-Browser-${PLUGIN_VERSION}.aerap")
           gh release create "$GITHUB_REF_NAME" "${files[@]}" \
             --title "AERA Browser ${GITHUB_REF_NAME#v}" --generate-notes
