@@ -11,7 +11,7 @@ on:
         required: false
         type: string
       version:
-        description: "Plugin version, e.g. 1.5.7 (defaults to tag name, else plugin.json)"
+        description: "Plugin version, e.g. 1.5.7 (defaults to tag name). Must differ from plugin.json in the repo."
         required: false
         type: string
       test_sign:
@@ -25,6 +25,10 @@ permissions:
 
 env:
   MESA_VERSION: "26.2.2"
+  # Redmi "sky" (ravelin) reports KGSL firmware gen6_3_26_0 => chip_id 0x06032600.
+  # Turnip's KGSL backend derives gpu_id = core*100 + major*10 + minor = 656 from it,
+  # so a bare GPUId(613) never matches. Match on the real chip_id instead.
+  A613_CHIP_ID: "0x06032600"
 
 jobs:
   # ---------------------------------------------------------------------------
@@ -51,13 +55,6 @@ jobs:
           fi
           ls source
 
-      - name: Add Adreno 613 support (vanilla repo has none)
-        run: |
-          if [ ! -f source/build-turnip-a613.sh ]; then
-            test -f add-a613-support.sh || { echo "::error::add-a613-support.sh missing; commit it next to the workflow"; exit 1; }
-            bash add-a613-support.sh .
-          fi
-
       - name: Shell + Python syntax
         run: |
           for f in source/*.sh; do bash -n "$f"; done
@@ -66,24 +63,22 @@ jobs:
       - name: plugin.json is valid JSON
         run: python3 -m json.tool plugin.json > /dev/null
 
-      - name: Mesa patches apply to a fresh 26.2.2 tree
+      - name: Mesa patches apply to a fresh ${{ env.MESA_VERSION }} tree
         run: |
           curl -fsSL "https://archive.mesa3d.org/mesa-${MESA_VERSION}.tar.xz" | tar -xJ
           cd "mesa-${MESA_VERSION}"
-          # The a613 patch file has a hand-written hunk that does not match the
-          # real 26.2.2 source, so add the entry directly. build-turnip-a613.sh
-          # skips its own patch step when GPUId(613) is already present.
           dev=src/freedreno/common/freedreno_devices.py
-          if ! grep -q 'GPUId(613)' "$dev"; then
+          if ! grep -q "chip_id=${A613_CHIP_ID}" "$dev"; then
             if ! grep -q 'GPUId(612)' "$dev"; then
-              echo "::error::GPUId(612) not found; printing nearby context"
+              echo "::error::GPUId(612) anchor not found; printing nearby context"
               grep -n -B3 -A6 'a6xx_gen1_low' "$dev" || true
+              grep -n '612' "$dev" || true
               exit 1
             fi
-            sed -i '/^[[:space:]]*GPUId(612),/a\        GPUId(613),' "$dev"
+            sed -i "/^[[:space:]]*GPUId(612),/a\\        GPUId(chip_id=${A613_CHIP_ID}, name=\"Adreno (TM) 613\"),\\n        GPUId(chip_id=0xffff${A613_CHIP_ID#0x}, name=\"Adreno (TM) 613\")," "$dev"
           fi
-          grep -n -B5 -A4 'GPUId(613)' "$dev"
-          # Same order the build scripts use: (a613) -> a825 -> a722
+          grep -n -B3 -A3 "chip_id=${A613_CHIP_ID}" "$dev"
+          # Same order build-turnip-a825.sh uses: a825 -> a722
           for p in a825 a722 zink-kgsl-surfaceless; do
             patch --dry-run -p1 -i "../source/patches/mesa-${MESA_VERSION}-$p"*.patch
             patch -p1 -i "../source/patches/mesa-${MESA_VERSION}-$p"*.patch
@@ -91,8 +86,7 @@ jobs:
 
   # ---------------------------------------------------------------------------
   # Build the Turnip Vulkan driver (aarch64 / musl) inside Alpine on a native
-  # ARM64 runner. This is the only component rebuilt in recent releases
-  # (1.5.5 -> 1.5.7).
+  # ARM64 runner.
   # ---------------------------------------------------------------------------
   turnip:
     needs: validate
@@ -116,31 +110,22 @@ jobs:
           fi
           ls source
 
-      - name: Add Adreno 613 support (vanilla repo has none)
-        run: |
-          if [ ! -f source/build-turnip-a613.sh ]; then
-            test -f add-a613-support.sh || { echo "::error::add-a613-support.sh missing; commit it next to the workflow"; exit 1; }
-            bash add-a613-support.sh .
-          fi
-
-      - name: Download Mesa ${{ env.MESA_VERSION }}
+      - name: Download Mesa ${{ env.MESA_VERSION }} and add Adreno 613
         run: |
           curl -fsSL "https://archive.mesa3d.org/mesa-${MESA_VERSION}.tar.xz" | tar -xJ
           mv "mesa-${MESA_VERSION}" mesa-src
           cd mesa-src
-          # The a613 patch file has a hand-written hunk that does not match the
-          # real 26.2.2 source, so add the entry directly. build-turnip-a613.sh
-          # skips its own patch step when GPUId(613) is already present.
           dev=src/freedreno/common/freedreno_devices.py
-          if ! grep -q 'GPUId(613)' "$dev"; then
+          if ! grep -q "chip_id=${A613_CHIP_ID}" "$dev"; then
             if ! grep -q 'GPUId(612)' "$dev"; then
-              echo "::error::GPUId(612) not found; printing nearby context"
+              echo "::error::GPUId(612) anchor not found; printing nearby context"
               grep -n -B3 -A6 'a6xx_gen1_low' "$dev" || true
+              grep -n '612' "$dev" || true
               exit 1
             fi
-            sed -i '/^[[:space:]]*GPUId(612),/a\        GPUId(613),' "$dev"
+            sed -i "/^[[:space:]]*GPUId(612),/a\\        GPUId(chip_id=${A613_CHIP_ID}, name=\"Adreno (TM) 613\"),\\n        GPUId(chip_id=0xffff${A613_CHIP_ID#0x}, name=\"Adreno (TM) 613\")," "$dev"
           fi
-          grep -n -B5 -A4 'GPUId(613)' "$dev"
+          grep -n -B3 -A3 "chip_id=${A613_CHIP_ID}" "$dev"
 
       - name: Build libvulkan_freedreno.so (Alpine / musl)
         run: |
@@ -173,7 +158,8 @@ jobs:
 
           export NINJA=samu
           export AERA_BROWSER_JOBS="$(nproc)"
-          bash source/build-turnip-a613.sh /work/mesa-src /work/mesa-build /tmp/cross.ini
+          # Applies A825 + A722 (repo patches); A613 was already added above.
+          bash source/build-turnip-a825.sh /work/mesa-src /work/mesa-build /tmp/cross.ini
 
           mkdir -p /work/out
           cp /work/mesa-build/src/freedreno/vulkan/libvulkan_freedreno.so /work/out/
@@ -181,6 +167,18 @@ jobs:
           ls -l /work/out
           SCRIPT
           docker run --rm -v "$PWD":/work -w /work alpine:3.22 sh build-in-alpine.sh
+
+      - name: Verify the built driver knows this GPU
+        run: |
+          sudo apt-get install -y binutils >/dev/null
+          lib=out/libvulkan_freedreno.so
+          strings "$lib" | grep -F 'Adreno (TM) 613' \
+            || { echo "::error::Adreno (TM) 613 not present in built driver"; exit 1; }
+          # Existing GPUs must still be there
+          for n in 'Adreno (TM) 722' 'Adreno (TM) 825'; do
+            strings "$lib" | grep -qF "$n" || { echo "::error::$n missing from built driver"; exit 1; }
+          done
+          echo "OK: 613 / 722 / 825 present"
 
       - uses: actions/upload-artifact@v4
         with:
@@ -192,9 +190,9 @@ jobs:
   # Overlay the fresh Turnip build onto the staged runtime, pack it into
   # runtime.xz, refresh plugin.json, optionally sign it.
   #
-  # The WPE WebKit / Mesa-EGL / worker runtime is NOT built here: it needs a
-  # patched WPE 2.52.6 tree and a custom Alpine sysroot that are not part of
-  # this repo (see source/BUILD-NOTES.md). Provide it as a tarball.
+  # The WPE WebKit / Mesa-EGL / worker runtime is NOT built here (see
+  # source/BUILD-NOTES.md). Provide it as a tarball, or leave unset to start
+  # from the currently published runtime in plugin.json.
   # ---------------------------------------------------------------------------
   package:
     needs: turnip
@@ -225,8 +223,26 @@ jobs:
           fi
           ls source
 
+      - name: Resolve version (must be bumped)
+        run: |
+          ver="${{ inputs.version }}"
+          if [ -z "$ver" ] && [ "$GITHUB_REF_TYPE" = tag ] && [[ "$GITHUB_REF_NAME" == v* ]]; then
+            ver="${GITHUB_REF_NAME#v}"
+          fi
+          cur=$(python3 -c "import json;print(json.load(open('plugin.json'))['version'])")
+          if [ -z "$ver" ]; then
+            echo "::error::No version. Push a tag like v1.5.7 or pass the 'version' input (repo plugin.json is $cur)."
+            exit 1
+          fi
+          if [ "$ver" = "$cur" ]; then
+            echo "::error::Version $ver equals plugin.json ($cur). The manifest would point at the OLD release's runtime.xz. Bump it."
+            exit 1
+          fi
+          echo "PLUGIN_VERSION=$ver" >> "$GITHUB_ENV"
+          echo "Building version $ver (was $cur)"
+
       - name: Install tools
-        run: sudo apt-get update && sudo apt-get install -y xz-utils zstd xxd
+        run: sudo apt-get update && sudo apt-get install -y xz-utils zstd xxd binutils
 
       - uses: actions/download-artifact@v4
         with:
@@ -298,6 +314,8 @@ jobs:
           for h in "${hits[@]}"; do
             echo "replacing $h"
             install -m 0755 turnip/libvulkan_freedreno.so "$h"
+            strings "$h" | grep -qF 'Adreno (TM) 613' \
+              || { echo "::error::$h lacks Adreno 613 after replace"; exit 1; }
           done
 
       - name: Pack runtime.xz
@@ -305,18 +323,16 @@ jobs:
 
       - name: Update plugin.json
         run: |
-          ver="${{ inputs.version }}"
-          [ -z "$ver" ] && [[ "$GITHUB_REF_NAME" == v* && "$GITHUB_REF_TYPE" == tag ]] && ver="${GITHUB_REF_NAME#v}"
-          python3 - "$ver" <<'PY'
+          python3 - "$PLUGIN_VERSION" <<'PY'
           import hashlib, json, os, re, sys
           ver = sys.argv[1]
           hpp = open("build/aera_browser_payload.hpp").read()
           num = lambda k: int(re.search(rf"{k}\s*=\s*(\d+)", hpp).group(1))
           txt = lambda k: re.search(rf'{k}\[\]\s*=\s*"([0-9a-f]+)"', hpp).group(1)
           p = json.load(open("plugin.json"))
-          if ver: p["version"] = ver
+          p["version"] = ver
           p["payload_url"] = (f"https://github.com/{os.environ['GITHUB_REPOSITORY']}"
-                              f"/releases/download/v{p['version']}/runtime.xz")
+                              f"/releases/download/v{ver}/runtime.xz")
           p["payload_size"]    = num("kCompressedBytes")
           p["payload_sha256"]  = txt("kCompressedHash")
           p["expanded_size"]   = num("kExpandedBytes")
@@ -327,7 +343,7 @@ jobs:
           json.dump(p, open("build/plugin.json","w"), indent=2, ensure_ascii=False)
           open("build/plugin.json","a").write("\n")
           PY
-          cat build/plugin.json | head -20
+          head -20 build/plugin.json
 
       - name: Sign plugin.json (test key, throwaway)
         if: ${{ inputs.test_sign }}
@@ -360,6 +376,11 @@ jobs:
             -in build/plugin.json -out build/plugin.json.sig.bin
           xxd -p -c 256 build/plugin.json.sig.bin > build/plugin.json.sig
           rm -f key.pem build/plugin.json.sig.bin
+
+      - name: Warn if unsigned
+        if: ${{ env.SIGNING_KEY == '' && !inputs.test_sign }}
+        run: |
+          echo "::warning::No AERA_PLUGIN_PRIVATE_KEY secret, so plugin.json is UNSIGNED. A recovery that verifies signatures will reject it."
 
       - uses: actions/upload-artifact@v4
         with:
