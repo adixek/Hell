@@ -169,11 +169,15 @@ jobs:
 
           /* AERA debug: surface Zink/Mesa error messages in recovery.log */
           #include <stdlib.h>
+          #include <stdio.h>
           __attribute__((constructor, used)) static void aera_debug_env_ctor(void)
           {
              /* The marker is used by code, so the linker cannot drop it. */
              setenv("AERA_DEBUG_ENV_CTOR", "1", 0);
              setenv("MESA_LOG_LEVEL", "debug", 0);
+             /* Visible proof in recovery.log that this exact driver build ran. */
+             fputs("AERA-DEBUG-CTOR: Turnip loaded, MESA_LOG_LEVEL set\n", stderr);
+             fflush(stderr);
           }
           EOF4
           tail -12 "$f"
