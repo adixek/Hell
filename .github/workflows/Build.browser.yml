@@ -156,6 +156,27 @@ jobs:
           PY
           grep -n -B3 -A6 'Adreno (TM) 613' "$dev"
 
+      # No wrapper, no recovery rebuild: a constructor compiled into the Turnip
+      # library itself. The Vulkan loader dlopen()s this library before Zink
+      # reports any failure, so Mesa's log filter is already raised by then.
+      # overwrite=0, so a value set by the launcher still wins.
+      - name: Add debug environment constructor to Turnip
+        run: |
+          f=mesa-src/src/freedreno/vulkan/tu_util.cc
+          [ -f "$f" ] || f=mesa-src/src/freedreno/vulkan/tu_device.cc
+          [ -f "$f" ] || { echo "::error::no Turnip source file found for the debug constructor"; exit 1; }
+          cat >> "$f" <<'EOF4'
+
+          /* AERA debug: surface Zink/Mesa error messages in recovery.log */
+          #include <stdlib.h>
+          static const char aera_debug_marker[] __attribute__((used)) = "AERA_DEBUG_ENV_CTOR";
+          __attribute__((constructor, used)) static void aera_debug_env_ctor(void)
+          {
+             setenv("MESA_LOG_LEVEL", "debug", 0);
+          }
+          EOF4
+          tail -12 "$f"
+
       - name: Build libvulkan_freedreno.so (Alpine / musl)
         run: |
           cat > build-in-alpine.sh <<'SCRIPT'
@@ -208,6 +229,9 @@ jobs:
             strings "$lib" | grep -qF "$n" || { echo "::error::$n missing from built driver"; exit 1; }
           done
           echo "OK: 613 / 722 / 825 present"
+          strings "$lib" | grep -qF 'AERA_DEBUG_ENV_CTOR' \
+            || { echo "::error::debug constructor missing from built driver"; exit 1; }
+          echo "OK: debug constructor present"
 
       - uses: actions/upload-artifact@v4
         with:
